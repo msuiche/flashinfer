@@ -1744,6 +1744,12 @@ def test_sparse_mla_sm120_prefill_dsv4_dual_wide_main_topk_length_truncation(
     ref_out, ref_lse = _ref_sparse_attn(
         q, virtual_kv, virtual_idx, sm_scale, d_v, attn_sink=attn_sink
     )
+    if attn_sink is None:
+        # Kernel-family convention (shared with the SG/dsv3_2 kernels and
+        # asserted by the existing zero-length tests): a fully empty row
+        # reports LSE=-1e30, while the dense reference produces -inf.
+        empty_rows = (topk_length == 0) & (extra_topk_length == 0)
+        ref_lse[empty_rows] = -1e30
 
     output = torch.zeros(
         (num_tokens, num_heads, d_v), dtype=torch.bfloat16, device=device
