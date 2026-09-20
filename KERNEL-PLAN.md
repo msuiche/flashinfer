@@ -260,3 +260,54 @@ reference, TK=128 regression). K4: VL boot via
 `COMPOSE_FILE=recipe/upstream-vision/docker-compose.upstream-vision-vl-nospec.yml`,
 `UPSTREAM_VISION_IMAGE=vllm-upstream-vision:k2-topk512`, Vision-Exp snapshot
 `6821d6ad`, then `benchmarks/vision_smoke_probe.py`.
+
+### K3 (2026-09-20 window, head GPU, sm_121a)
+
+Window opened 21:09:49 UTC (production parked on both nodes). Two
+gate-keeping artifacts, both in the `vllm-upstream-vision:k2-topk512` image:
+
+**pytest** — `/fi-tests/attention/test_sparse_mla_sm120.py -k "prefill_dsv4
+or dsv4_public_api"`: **165 passed, 0 failed** (39.35s). Covers the 20 new
+wide-main dual cases (topk 192/256/512 x extra 512 x extra-pbs 64/2 x heads
+{8,16,32,64,128}), the new 512 truncation cases (edge lens 0/1/63/64/65/128/
+133/384/511/512, sink on/off), and the whole pre-existing dsv4 prefill +
+dual suite (regression). One test-authoring fix during the window: the
+kernel family reports LSE=-1e30 for a fully empty row
+(`softmax_lse` in common/online_softmax.cuh; the pre-existing dsv3_2
+zero-length test asserts the same sentinel), where the dense reference
+produces -inf — the new truncation test now expects the kernel convention
+(commit `22d670da`). Outputs already agreed (both 0).
+
+**validation script** (`dsv4_dual_topk512_validation.py`, verbatim output):
+
+```
+== sink=on (topk=512, extra=512) ==
+ A (extended kernel) vs C (torch reference):
+  out   max_abs=0.001099 max_rel=0.105286 inf_agree=True worst(ref=-0.019531 got=-0.020630) elem(rel>1%&abs>2e-3)=0
+  lse   max_abs=0.000002 max_rel=0.000000 inf_agree=True
+ B (slicing oracle) vs C (torch reference):
+  out   max_abs=0.001099 max_rel=0.105286 inf_agree=True elem(rel>1%&abs>2e-3)=0
+  lse   max_abs=0.000002
+ A vs B (kernel vs oracle):
+  out   max_abs=0.000115 max_rel=0.008574 inf_agree=True elem(rel>1%&abs>2e-3)=0
+  lse   max_abs=0.000002
+== sink=off (topk=512, extra=512) ==
+ A vs C:  out max_abs=0.001221 max_rel=0.112152 elem(rel>1%&abs>2e-3)=0 ; lse max_abs=0.000002
+ B vs C:  out max_abs=0.001221 max_rel=0.112152 elem(rel>1%&abs>2e-3)=0 ; lse max_abs=0.000002
+ A vs B:  out max_abs=0.000117 max_rel=0.008209 elem(rel>1%&abs>2e-3)=0 ; lse max_abs=0.000001
+== regression: TK=128 dual (text shape) vs reference ==
+  out   max_abs=0.001099 max_rel=0.103760 elem(rel>1%&abs>2e-3)=0 ; lse max_abs=0.000002
+VERDICT: PASS
+```
+
+Reading: the extended kernel and the slicing oracle agree with each other
+to **0.86% max relative** (inside the slicing reference's own 1% bound), and
+each sits at max_abs ~1.1e-3 from the fp32 reference with LSE exact to 2e-6.
+The ~0.10-0.11 "max_rel" against the reference is BF16 output rounding on
+near-zero elements (worst element |ref|=0.019, err 1.1e-3) and is
+**identical on the stock TK=128 text shape** (max_abs=0.001099, same
+elements) — the extension adds no error over the kernel family's own
+baseline error class. Zero elements fail both rel>1% and abs>2e-3 anywhere.
+
+**K3 verdict: PASS.** The TK=512 dual kernel is numerically the TK=128
+kernel at a longer trip count, as designed.
