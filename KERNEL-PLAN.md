@@ -209,4 +209,54 @@ regression at TK=128: same template instantiation as today.
 
 ## 10. Results
 
-(K2 build, K3 numerics, K4 VL boot: appended as the phases complete.)
+### K2 (2026-09-20, CPU only — no production touch)
+
+Implementation: commit `e9ef4835` on `sm121-dsv4-prefill-topk512` — the
+dispatch extension from §4 (one file) plus the §6 tests. Nothing else in the
+tree changed; the kernel template is untouched.
+
+Build (rig head, inside the day-0 image toolchain, CPU-only):
+
+- `flashinfer_python-0.6.18-py3-none-any.whl` (18.4 MB, version string
+  exactly `0.6.18`, so the flashinfer-jit-cache `startswith` version pin
+  stays satisfied). Verified the wheel's installed
+  `data/csrc/sparse_mla_sm120_prefill.cu` carries `DISPATCH_BY_TK_PBSX`.
+- JIT-precompiled the `sparse_mla_sm120` module for `12.1a`
+  (`FLASHINFER_CUDA_ARCH_LIST="12.1a"`, ninja 6/6). `strings` on the .so
+  confirms all ten TK=512 dual instantiations: NH ∈ {8,16,32,64,128} ×
+  extra-page ∈ {64,2}, DSV4/BF16 (`ModelType1E ComputeMode1E`), e.g.
+  `sparse_mla_prefill_mg_dual_kernel<ModelType1, ComputeMode1, 32, 512, 64, 64, 2>`.
+
+Integration trap found and handled: with flashinfer-jit-cache installed,
+`JitSpecNvcc.try_load()` (`flashinfer/jit/core.py:396-410`) returns the AOT
+`.so` **unconditionally** when it exists — patched sources would silently
+load the stock TK=128-only module. The image stage therefore swaps the AOT
+artifact
+(`/usr/local/lib/python3.12/dist-packages/flashinfer_jit_cache/jit_cache/sparse_mla_sm120/sparse_mla_sm120.so`,
+stock backed up as `sparse_mla_sm120.so.stock-k2`) and fails the build
+unless version, dispatch marker, the TK=512 NH=32 kernel symbol, and the
+post-swap sha256 all check out
+(dspark-fork `recipe/upstream-vision/verify-k2-flashinfer-topk512.py`).
+
+Artifacts:
+
+- Test image `vllm-upstream-vision:k2-topk512`
+  (`recipe/upstream-vision/Dockerfile.k2-flashinfer-topk512`), image id
+  `d2c6f265d5a5` on head and worker (docker save | ssh docker load; ids
+  compared — the repo's build-once-and-ship rule). Verifier prints
+  `K2_FLASHINFER_TOPK512_PATCH_OK` on both nodes; AOT sha256
+  `b504d7631fca…` on both.
+- Scratch on head: `~/flashinfer-sm121/{src,out,fi-ws}` (fork checkout,
+  wheel, prebuilt module). K3 script staged at
+  `~/flashinfer-sm121/dsv4_dual_topk512_validation.py` (repo copy:
+  dspark-fork `benchmarks/dsv4_dual_topk512_validation.py`).
+
+K3/K4 readiness: everything below needs a GPU window (production parked on
+both nodes, restored after). K3: pytest subset
+(`-k "prefill_dsv4 or dsv4_public_api"` incl. the new wide-main dual tests)
++ the validation script (extended kernel vs slicing oracle vs torch
+reference, TK=128 regression). K4: VL boot via
+`scripts/start-upstream-vision-test.sh` with
+`COMPOSE_FILE=recipe/upstream-vision/docker-compose.upstream-vision-vl-nospec.yml`,
+`UPSTREAM_VISION_IMAGE=vllm-upstream-vision:k2-topk512`, Vision-Exp snapshot
+`6821d6ad`, then `benchmarks/vision_smoke_probe.py`.
