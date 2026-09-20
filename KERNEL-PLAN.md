@@ -311,3 +311,50 @@ baseline error class. Zero elements fail both rel>1% and abs>2e-3 anywhere.
 
 **K3 verdict: PASS.** The TK=512 dual kernel is numerically the TK=128
 kernel at a longer trip count, as designed.
+
+### K4 (same window, VL lane boot + vision smoke)
+
+First boot attempt (21:26 UTC) died before attention, at MoE backend
+selection: `Mxfp4 MoE backend 'B12X_MXFP4_BF16' does not support the
+deployment configuration since kernel does not support current device
+cuda.` Root cause: the k2 stage was initially `FROM` the raw day-0 image,
+which lacks the b12x package (the phase-1 image's L-layers install it; the
+phase-1 gates show `b12x=1.3.0 api=True` where the raw image shows "No
+package metadata"). The oracle fell through MXFP4_MXFP8 to BF16, which
+rejects sm_121a. Not a kernel fault — the boot never reached attention.
+Fix: rebase the k2 stage `FROM vllm-upstream-vision:phase1` (flashinfer is
+0.6.18 in both bases), rebuild, re-ship (image id `0df735b20075`, both
+nodes), re-verify (`K2_FLASHINFER_TOPK512_PATCH_OK` on both) and re-run the
+K3 pytest on the rebased image (165/165, 38.95s).
+
+Second boot (up at 21:41 UTC, ~7 min): `Resolved architecture:
+DeepseekV4ForConditionalGeneration`, `Using 'B12X_MXFP4_MXFP8' Mxfp4 MoE
+backend`, and the warmup dummy prefill — the exact call that killed the
+phase-3 boot at `topk=512` — passed through the extended dual kernel.
+`/v1/models` -> `deepseek-v4-flash-vision-exp-k2`, max_model_len 131072,
+root = snapshot `6821d6ad`; minimal chat succeeded.
+
+`benchmarks/vision_smoke_probe.py` (one probe-side fix: vLLM 0.28 nests the
+usage breakdown as `prompt_tokens_details.multimodal_tokens={"image": N}`;
+the probe now unwraps it):
+
+```
+[A 1260x378]  prompt_tokens=328 image_tokens=315 content='The image is a smooth, colorful gradient ...'
+              expect grid=(9,30) block=314(+0..3 pad) patches=2430
+[B 714x210]   prompt_tokens=124 image_tokens=111 content='The image is a smooth, colorful gradient ...'
+              expect grid=(5,17) block=110(+0..3 pad) patches=765
+[A+text mix]  image_tokens=315 content='Top-left'   (asked: darkest corner)
+[text-only]   image_tokens=None content='OK'
+[conc-1] ok=True 11.8s   [conc-2] ok=True 11.8s
+vision_smoke_probe: PASS
+```
+
+Image-token math lands inside the documented compressor-pad envelope on
+both controlled grids (315 in [314,317]; 111 in [110,113]), the
+image+text mix answers coherently, the text-only regression is clean, and
+2-way concurrency passes. **K4 verdict: PASS — the VL lane serves on the
+extended kernel.**
+
+Window close: test containers removed on both nodes 21:44 UTC; production
+restored with `weightless/setup.py serve 11` (verification appended below).
+Total park ~35 min of which the two K4 boots were ~15 min.
